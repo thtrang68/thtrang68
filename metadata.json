@@ -1,0 +1,5 @@
+{
+  "name": "Lịch Trình Thông Minh",
+  "description": "Ứng dụng quản lý thời gian biểu với tính năng nhắc nhở thông minh trước 1 giờ và cảnh báo quá hạn.",
+  "requestFramePermissions": []
+}
