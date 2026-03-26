@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Plus, Bell, CalendarDays, Clock, AlertCircle, Download, Search, Moon, Sun, Sparkles } from 'lucide-react';
+import { Plus, Bell, CalendarDays, Clock, AlertCircle, Download, Search, Moon, Sun, Sparkles, Volume2, VolumeX } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import TimeDisplay from './components/TimeDisplay';
 import ScheduleList from './components/ScheduleList';
@@ -25,7 +25,10 @@ export default function App() {
     }
     return false;
   });
+  const [backendStatus, setBackendStatus] = useState<{ status: string, supabase: boolean } | null>(null);
+  const [isSoundEnabled, setIsSoundEnabled] = useState(false);
   const audioIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
 
   // Apply dark mode class
   useEffect(() => {
@@ -80,11 +83,19 @@ export default function App() {
 
   // Louder and Rhythmic Alarm Sound
   const startAlarmSound = () => {
-    if (audioIntervalRef.current) return;
+    if (!isSoundEnabled || audioIntervalRef.current) return;
 
-    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    if (!audioContextRef.current) {
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+    }
+    
+    const audioContext = audioContextRef.current;
+    if (audioContext.state === 'suspended') {
+      audioContext.resume();
+    }
     
     const playBeep = () => {
+      if (!isSoundEnabled) return;
       const oscillator = audioContext.createOscillator();
       const gainNode = audioContext.createGain();
 
@@ -107,6 +118,19 @@ export default function App() {
     playBeep();
   };
 
+  const toggleSound = () => {
+    if (!isSoundEnabled) {
+      // Initialize audio context on user interaction
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+      audioContextRef.current.resume();
+    } else {
+      stopAlarmSound();
+    }
+    setIsSoundEnabled(!isSoundEnabled);
+  };
+
   const stopAlarmSound = () => {
     if (audioIntervalRef.current) {
       clearInterval(audioIntervalRef.current);
@@ -114,31 +138,67 @@ export default function App() {
     }
   };
 
-  // Load data from backend on mount
+  // Load data from backend and localStorage on mount
   useEffect(() => {
+    const checkHealth = async () => {
+      try {
+        const res = await fetch('/api/health');
+        const data = await res.json();
+        console.log("Backend health check:", data);
+        setBackendStatus(data);
+      } catch (e) {
+        console.error("Backend health check failed:", e);
+        setBackendStatus({ status: 'error', supabase: false });
+      }
+    };
+    checkHealth();
+
     const fetchSchedules = async () => {
+      let backendSchedules: Schedule[] = [];
       try {
         const response = await fetch('/api/schedules');
-        if (!response.ok) throw new Error('Failed to fetch');
-        const data = await response.json();
-        const formatted = data.map((s: any) => ({
-          id: s.id,
-          title: s.title,
-          startTime: new Date(s.start_time),
-          completed: s.completed,
-          createdAt: new Date(s.created_at),
-          priority: s.priority || 'medium',
-          recurring: s.recurring || 'none'
-        }));
-        setSchedules(formatted);
+        if (response.ok) {
+          const data = await response.json();
+          backendSchedules = data.map((s: any) => ({
+            id: s.id,
+            title: s.title,
+            startTime: new Date(s.start_time),
+            completed: s.completed,
+            createdAt: new Date(s.created_at),
+            priority: s.priority || 'medium',
+            recurring: s.recurring || 'none'
+          }));
+        }
       } catch (e) {
-        console.error("Failed to fetch schedules", e);
+        console.error("Failed to fetch schedules from backend", e);
       }
+
+      // Load from localStorage
+      const localData = localStorage.getItem('local_schedules');
+      const localSchedules: Schedule[] = localData ? JSON.parse(localData).map((s: any) => ({
+        ...s,
+        startTime: new Date(s.startTime),
+        createdAt: new Date(s.createdAt)
+      })) : [];
+
+      // Merge and remove duplicates by ID
+      const allSchedules = [...backendSchedules];
+      localSchedules.forEach(ls => {
+        if (!allSchedules.find(as => as.id === ls.id)) {
+          allSchedules.push(ls);
+        }
+      });
+
+      setSchedules(allSchedules.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()));
     };
     fetchSchedules();
   }, []);
 
-  // Removed localStorage save effect
+  // Save local schedules to localStorage whenever they change
+  useEffect(() => {
+    const localOnly = schedules.filter(s => s.id.startsWith('local_'));
+    localStorage.setItem('local_schedules', JSON.stringify(localOnly));
+  }, [schedules]);
 
   // Notification and Urgent Task logic
   useEffect(() => {
@@ -213,26 +273,45 @@ export default function App() {
   }, [schedules]);
 
   const handleAddSchedule = async (title: string, startTime: Date, priority: Priority = 'medium', recurring: 'daily' | 'weekly' | 'none' = 'none') => {
+    const tempId = `local_${Date.now()}`;
+    const newLocalSchedule: Schedule = {
+      id: tempId,
+      title,
+      startTime,
+      completed: false,
+      createdAt: new Date(),
+      priority,
+      recurring,
+    };
+
+    // Optimistically add to UI
+    setSchedules(prev => [newLocalSchedule, ...prev]);
+
     try {
       const response = await fetch('/api/schedules', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title, startTime, priority, recurring })
       });
-      if (!response.ok) throw new Error('Failed to add');
-      const s = await response.json();
-      const newSchedule: Schedule = {
-        id: s.id,
-        title: s.title,
-        startTime: new Date(s.start_time),
-        completed: s.completed,
-        createdAt: new Date(s.created_at),
-        priority: s.priority,
-        recurring: s.recurring,
-      };
-      setSchedules(prev => [newSchedule, ...prev]);
+      
+      if (response.ok) {
+        const s = await response.json();
+        const syncedSchedule: Schedule = {
+          id: s.id,
+          title: s.title,
+          startTime: new Date(s.start_time),
+          completed: s.completed,
+          createdAt: new Date(s.created_at),
+          priority: s.priority,
+          recurring: s.recurring,
+        };
+        // Replace temp local schedule with synced one from DB
+        setSchedules(prev => prev.map(item => item.id === tempId ? syncedSchedule : item));
+      } else {
+        console.warn("Backend save failed, keeping in local storage.");
+      }
     } catch (e) {
-      console.error("Failed to add schedule", e);
+      console.error("Failed to sync with backend, kept in local storage.", e);
     }
   };
 
@@ -242,6 +321,22 @@ export default function App() {
 
     const isCompleting = !schedule.completed;
 
+    // Update UI immediately
+    setSchedules(prev => prev.map(s => s.id === id ? { ...s, completed: isCompleting } : s));
+
+    // Handle recurring logic immediately
+    if (isCompleting && schedule.recurring && schedule.recurring !== 'none') {
+      const nextStartTime = schedule.recurring === 'daily' 
+        ? addDays(schedule.startTime, 1) 
+        : addWeeks(schedule.startTime, 1);
+      
+      setTimeout(() => {
+        handleAddSchedule(schedule.title, nextStartTime, schedule.priority, schedule.recurring);
+      }, 500);
+    }
+
+    if (id.startsWith('local_')) return;
+
     try {
       const response = await fetch(`/api/schedules/${id}`, {
         method: 'PATCH',
@@ -249,31 +344,22 @@ export default function App() {
         body: JSON.stringify({ completed: isCompleting })
       });
       if (!response.ok) throw new Error('Failed to update');
-      
-      setSchedules(prev => prev.map(s => s.id === id ? { ...s, completed: isCompleting } : s));
-
-      // If completing a recurring task, create the next instance
-      if (isCompleting && schedule.recurring && schedule.recurring !== 'none') {
-        const nextStartTime = schedule.recurring === 'daily' 
-          ? addDays(schedule.startTime, 1) 
-          : addWeeks(schedule.startTime, 1);
-        
-        setTimeout(() => {
-          handleAddSchedule(schedule.title, nextStartTime, schedule.priority, schedule.recurring);
-        }, 500);
-      }
     } catch (e) {
-      console.error("Failed to update schedule", e);
+      console.error("Failed to update schedule on server", e);
     }
   };
 
   const handleDeleteSchedule = async (id: string) => {
+    // Update UI immediately
+    setSchedules(prev => prev.filter(s => s.id !== id));
+
+    if (id.startsWith('local_')) return;
+
     try {
       const response = await fetch(`/api/schedules/${id}`, { method: 'DELETE' });
       if (!response.ok) throw new Error('Failed to delete');
-      setSchedules(prev => prev.filter(s => s.id !== id));
     } catch (e) {
-      console.error("Failed to delete schedule", e);
+      console.error("Failed to delete schedule on server", e);
     }
   };
 
@@ -304,6 +390,32 @@ export default function App() {
             </div>
             
             <div className="flex items-center gap-2">
+              {backendStatus && (
+                <div className={cn(
+                  "hidden sm:flex items-center gap-1.5 px-3 py-2 rounded-2xl text-[10px] font-black uppercase tracking-wider border transition-all",
+                  backendStatus.supabase 
+                    ? "bg-emerald-50 text-emerald-600 border-emerald-100 dark:bg-emerald-900/10 dark:border-emerald-900/30" 
+                    : "bg-amber-50 text-amber-600 border-amber-100 dark:bg-amber-900/10 dark:border-amber-900/30"
+                )}>
+                  <div className={cn("w-1.5 h-1.5 rounded-full animate-pulse", backendStatus.supabase ? "bg-emerald-500" : "bg-amber-500")} />
+                  {backendStatus.supabase ? "Supabase Connected" : "Supabase Missing"}
+                </div>
+              )}
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={toggleSound}
+                className={cn(
+                  "p-3 rounded-2xl border shadow-sm hover:shadow-md transition-all",
+                  isSoundEnabled 
+                    ? "bg-indigo-50 border-indigo-100 text-indigo-600 dark:bg-indigo-900/20 dark:border-indigo-900/30 dark:text-indigo-400" 
+                    : "bg-white dark:bg-gray-900 border-gray-100 dark:border-gray-800 text-gray-400"
+                )}
+                title={isSoundEnabled ? "Tắt âm thanh" : "Bật âm thanh"}
+              >
+                {isSoundEnabled ? <Volume2 size={20} /> : <VolumeX size={20} />}
+              </motion.button>
+
               <motion.button
                 whileHover={{ scale: 1.05 }}
                 whileTap={{ scale: 0.95 }}
