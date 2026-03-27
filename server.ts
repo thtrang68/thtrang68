@@ -13,23 +13,34 @@ app.use(express.json());
 
 // Supabase Client Initialization
 const getSupabase = () => {
-  const supabaseUrl = process.env.SUPABASE_URL || "";
-  const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || "";
+  let supabaseUrl = (process.env.SUPABASE_URL || "").trim();
+  const supabaseAnonKey = (process.env.SUPABASE_ANON_KEY || "").trim();
 
   if (!supabaseUrl || !supabaseAnonKey) {
     return null;
   }
 
-  // Basic validation to prevent Supabase SDK from throwing and crashing the server
+  // Auto-fix URL if it's just the project ID or missing protocol
   if (!supabaseUrl.startsWith("http")) {
-    console.error("Invalid SUPABASE_URL: Must start with http:// or https://");
-    return null;
+    if (supabaseUrl.includes(".supabase.co")) {
+      supabaseUrl = `https://${supabaseUrl}`;
+    } else {
+      // Assume it's just the project ID
+      supabaseUrl = `https://${supabaseUrl}.supabase.co`;
+    }
   }
 
   try {
-    return createClient(supabaseUrl, supabaseAnonKey);
+    // Validate URL format before creating client
+    new URL(supabaseUrl);
+    return createClient(supabaseUrl, supabaseAnonKey, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+      }
+    });
   } catch (error) {
-    console.error("Failed to initialize Supabase client:", error);
+    console.error("Invalid SUPABASE_URL format:", supabaseUrl);
     return null;
   }
 };
